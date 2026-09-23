@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"archive/zip"
 	"bufio"
+	"compress/gzip"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -24,14 +25,39 @@ import (
 // 内置浏览器的下载分发地址。
 const browserCDNBase = "https://cdn.one-world.ai/browsers"
 
-// browserVersion 是内置浏览器的唯一版本源。升级只改 browser_version.txt 一处，Go 与 Dockerfile 同读。
+// browserVersion 是上游浏览器的版本源，Go 与 Dockerfile 共用。
 //
 //go:embed browser_version.txt
 var browserVersionRaw string
 
 var browserVersion = strings.TrimSpace(browserVersionRaw)
 
+// Linux/arm64 使用 CloakBrowser 免费版。版本和校验值单独存放，供 Docker
+// 与运行时下载器共用。
+//
+//go:embed browser_linux_arm64_version.txt
+var linuxArm64BrowserVersionRaw string
+
+//go:embed browser_linux_arm64.sha256
+var linuxArm64BrowserSHA256Raw string
+
+const cloakBrowserARM64Asset = "cloakbrowser-linux-arm64.tar.gz"
+
+func isLinuxARM64() bool {
+	return runtime.GOOS == "linux" && runtime.GOARCH == "arm64"
+}
+
+func browserVersionForPlatform() string {
+	if isLinuxARM64() {
+		return strings.TrimSpace(linuxArm64BrowserVersionRaw)
+	}
+	return browserVersion
+}
+
 func browserURL(name string) string {
+	if isLinuxARM64() {
+		return fmt.Sprintf("https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v%s/%s", browserVersionForPlatform(), name)
+	}
 	return browserCDNBase + "/" + browserVersion + "/" + name
 }
 
@@ -45,10 +71,14 @@ func platformAsset() (assetName, binName string, ok bool) {
 		}
 		return "macos-arm64.dmg", "Chromium", true
 	case "linux":
-		if runtime.GOARCH != "amd64" {
+		switch runtime.GOARCH {
+		case "amd64":
+			return "linux-x64.tar.xz", "chrome", true
+		case "arm64":
+			return cloakBrowserARM64Asset, "chrome", true
+		default:
 			return "", "", false
 		}
-		return "linux-x64.tar.xz", "chrome", true
 	case "windows":
 		if runtime.GOARCH != "amd64" {
 			return "", "", false
@@ -63,7 +93,7 @@ func browserCacheDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(base, "xiaohongshu-mcp", "browser", browserVersion), nil
+	return filepath.Join(base, "xiaohongshu-mcp", "browser", browserVersionForPlatform()), nil
 }
 
 // EnsureBrowser 确保本地存在内置浏览器二进制，返回其路径。
@@ -89,7 +119,7 @@ func EnsureBrowser() (string, error) {
 	}
 
 	// 下载（重试 3 次）
-	logrus.Infof("首次运行：下载内置浏览器 %s（%s，约 140-190MB，仅一次）...", browserVersion, asset)
+	logrus.Infof("首次运行：下载内置浏览器 %s（%s，仅一次）...", browserVersionForPlatform(), asset)
 	archivePath := filepath.Join(cacheDir, asset)
 	var dlErr error
 	for attempt := 1; attempt <= 3; attempt++ {
@@ -125,7 +155,7 @@ func EnsureBrowser() (string, error) {
 	return bin, nil
 }
 
-// verifySHA256 下载同目录的 SHA256SUMS，校验 asset 的哈希。
+// verifySHA256 校验 asset 的哈希。ARM64 用固定清单，其余平台读上游 SHA256SUMS。
 func verifySHA256(archivePath, asset string) error {
 	want, err := fetchExpectedSHA(asset)
 	if err != nil {
@@ -148,6 +178,9 @@ func verifySHA256(archivePath, asset string) error {
 }
 
 func fetchExpectedSHA(asset string) (string, error) {
+	if isLinuxARM64() {
+		return expectedSHAFromManifest(strings.NewReader(linuxArm64BrowserSHA256Raw), asset)
+	}
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Get(browserURL("SHA256SUMS"))
 	if err != nil {
 		return "", err
@@ -156,7 +189,11 @@ func fetchExpectedSHA(asset string) (string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("获取 SHA256SUMS: HTTP %d", resp.StatusCode)
 	}
-	sc := bufio.NewScanner(resp.Body)
+	return expectedSHAFromManifest(resp.Body, asset)
+}
+
+func expectedSHAFromManifest(manifest io.Reader, asset string) (string, error) {
+	sc := bufio.NewScanner(manifest)
 	for sc.Scan() {
 		// 格式：<hash>␠␠<filename>
 		fields := strings.Fields(sc.Text())
@@ -209,6 +246,8 @@ func extractArchive(archivePath, destDir string) error {
 	switch {
 	case strings.HasSuffix(archivePath, ".tar.xz"):
 		return extractTarXz(archivePath, destDir)
+	case strings.HasSuffix(archivePath, ".tar.gz"):
+		return extractTarGz(archivePath, destDir)
 	case strings.HasSuffix(archivePath, ".zip"):
 		return extractZip(archivePath, destDir)
 	case strings.HasSuffix(archivePath, ".dmg"):
@@ -227,7 +266,25 @@ func extractTarXz(archivePath, destDir string) error {
 	if err != nil {
 		return err
 	}
-	tr := tar.NewReader(xzr)
+	return extractTar(xzr, destDir)
+}
+
+func extractTarGz(archivePath, destDir string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gzr, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+	return extractTar(gzr, destDir)
+}
+
+func extractTar(r io.Reader, destDir string) error {
+	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
 		if err == io.EOF {

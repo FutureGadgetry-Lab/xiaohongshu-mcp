@@ -343,7 +343,7 @@ Download pre-compiled binaries for your platform directly from [GitHub Releases]
 - **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
 - **Linux x64**: `xiaohongshu-login-linux-amd64`
 
-> Only the three platforms above are supported. macOS Intel and Linux ARM64 are not supported.
+> The precompiled main program is currently available for the three platforms above. Linux ARM64 can be built from source or with the Dockerfile; the Docker image uses the free CloakBrowser Chromium 146 build. See the [ARM64 guide (Chinese)](./docs/ARM64.md) for Raspberry Pi builds and maintenance. macOS Intel is not supported.
 
 Usage Steps:
 

@@ -14,7 +14,8 @@ RUN go mod download
 COPY . .
 # VERSION 由 CI 通过 --build-arg 传入，本地构建默认 dev
 ARG VERSION=dev
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/app .
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w -X main.version=${VERSION}" -o /out/app .
 
 # ---- run stage ----
 FROM ubuntu:22.04
@@ -87,23 +88,42 @@ RUN mkdir -p /app/data/home /app/data/config /app/images && \
     chmod -R 777 /app/data /app/images
 
 # 4. 下载并解压内置浏览器。构建阶段预置，运行时零下载。
-# 版本号唯一来源：browser/browser_version.txt（Go 也读它，避免两处漂移）。
-# 从自建 CDN 下载中性文件名，并校验 SHA256。
+# 浏览器按目标架构选择版本：amd64 从自建 CDN 下载，arm64 使用 CloakBrowser 免费版。
+# 各版本号和校验值与 Go 下载器共用对应文件。
 #
 # 解压位置必须与 Go 端 EnsureBrowser 找的缓存路径一致：
 # $XDG_CACHE_HOME/xiaohongshu-mcp/browser/<版本>/，这样运行时零下载、也不需要任何参数。
 # 注意 XDG_CACHE_HOME 指向 /app/cache 而非挂载卷内，否则预置的浏览器会被挂载盖掉。
 ENV XDG_CACHE_HOME=/app/cache
-COPY browser/browser_version.txt /tmp/browser_version.txt
-RUN VER="$(cat /tmp/browser_version.txt | tr -d '[:space:]')" && \
-    BASE="https://cdn.one-world.ai/browsers/${VER}" && \
-    BROWSER_DIR="${XDG_CACHE_HOME}/xiaohongshu-mcp/browser/${VER}" && \
-    mkdir -p "${BROWSER_DIR}" && \
-    curl -fsSL -o /tmp/browser.tar.xz "${BASE}/linux-x64.tar.xz" && \
-    curl -fsSL "${BASE}/SHA256SUMS" | grep " linux-x64.tar.xz$" | awk '{print $1"  /tmp/browser.tar.xz"}' | sha256sum -c - && \
-    tar -xJf /tmp/browser.tar.xz -C "${BROWSER_DIR}" --strip-components=1 && \
-    rm /tmp/browser.tar.xz /tmp/browser_version.txt && \
-    test -x "${BROWSER_DIR}/chrome" && \
+ARG TARGETARCH
+COPY browser/browser_version.txt browser/browser_linux_arm64_version.txt browser/browser_linux_arm64.sha256 /tmp/
+RUN set -eu; \
+    if [ "${TARGETARCH}" = "arm64" ]; then \
+        VER="$(tr -d '[:space:]' < /tmp/browser_linux_arm64_version.txt)"; \
+        ASSET="cloakbrowser-linux-arm64.tar.gz"; \
+        BROWSER_DIR="${XDG_CACHE_HOME}/xiaohongshu-mcp/browser/${VER}"; \
+        BASE="https://github.com/CloakHQ/CloakBrowser/releases/download/chromium-v${VER}"; \
+        mkdir -p "${BROWSER_DIR}"; \
+        curl -fsSL -o "/tmp/${ASSET}" "${BASE}/${ASSET}"; \
+        (cd /tmp && sha256sum -c browser_linux_arm64.sha256); \
+        tar -xzf "/tmp/${ASSET}" -C "${BROWSER_DIR}"; \
+        test -n "$(find "${BROWSER_DIR}" -type f -name chrome -print -quit)"; \
+        rm "/tmp/${ASSET}"; \
+    elif [ "${TARGETARCH}" = "amd64" ]; then \
+        VER="$(tr -d '[:space:]' < /tmp/browser_version.txt)"; \
+        BROWSER_DIR="${XDG_CACHE_HOME}/xiaohongshu-mcp/browser/${VER}"; \
+        BASE="https://cdn.one-world.ai/browsers/${VER}"; \
+        mkdir -p "${BROWSER_DIR}"; \
+        curl -fsSL -o /tmp/browser.tar.xz "${BASE}/linux-x64.tar.xz"; \
+        curl -fsSL "${BASE}/SHA256SUMS" | grep " linux-x64.tar.xz$" | awk '{print $1"  /tmp/browser.tar.xz"}' | sha256sum -c -; \
+        tar -xJf /tmp/browser.tar.xz -C "${BROWSER_DIR}" --strip-components=1; \
+        test -x "${BROWSER_DIR}/chrome"; \
+        rm /tmp/browser.tar.xz; \
+    else \
+        echo "Unsupported Docker target architecture: ${TARGETARCH}" >&2; \
+        exit 1; \
+    fi; \
+    rm -f /tmp/browser_version.txt /tmp/browser_linux_arm64_version.txt /tmp/browser_linux_arm64.sha256; \
     chmod -R 755 /app/cache
 
 COPY --from=builder /out/app .

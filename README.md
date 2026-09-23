@@ -343,7 +343,7 @@ https://github.com/user-attachments/assets/cc385b6c-422c-489b-a5fc-63e92c695b80
 - **Windows x64**: `xiaohongshu-login-windows-amd64.exe`
 - **Linux x64**: `xiaohongshu-login-linux-amd64`
 
-> 目前支持以上三个平台。macOS Intel 与 Linux ARM64 暂不支持。
+> 上述是目前提供预编译主程序的三个平台。Linux ARM64 可从源码或 Dockerfile 构建，Docker 镜像会使用 CloakBrowser 免费版 Chromium 146；树莓派的构建与维护步骤见 [ARM64 指南](./docs/ARM64.md)。macOS Intel 暂不支持。
 
 使用步骤：
 

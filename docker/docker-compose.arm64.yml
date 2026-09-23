@@ -1,0 +1,8 @@
+# 与 docker-compose.yml 一起使用，改用本仓库构建的 ARM64 镜像。
+services:
+  xiaohongshu-mcp:
+    image: xiaohongshu-mcp:arm64
+    platform: linux/arm64
+    build:
+      context: ..
+      dockerfile: Dockerfile
